@@ -1,0 +1,31 @@
+[package]
+name = "npp-acp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "npp_acp"
+crate-type = ["cdylib", "rlib"]
+path = "src/lib.rs"
+
+[[bin]]
+name = "npp-acp-dev"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+wry = "0.57"
+tao = "0.37"
+agent-client-protocol = { version = "5.2.0", features = ["process", "stdio"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync"] }
+raw-window-handle = "0.6"
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Com",
+    "Win32_Graphics_Gdi",
+] }

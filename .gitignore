@@ -1,0 +1,66 @@
+# Rust
+/target/
+**/*.rs.bk
+*.pdb
+*.profraw
+
+# Node / Vite+
+node_modules/
+**/node_modules/
+dist/
+**/dist/
+.vite/
+**/.vite/
+.vite-plus/
+*.local
+pnpm-debug.log*
+npm-debug.log*
+yarn-error.log*
+.npm/
+
+# Local env / secrets
+.env
+.env.*
+!.env.example
+
+# Dev harness artifacts
+*.log
+tmp-*
+screenshot-*.png
+**/*.WebView2/
+
+# Local build / test outputs
+.dist/
+*.zip
+*.7z
+*.tar.gz
+*.bak
+*.orig
+*.rej
+*.tsbuildinfo
+coverage/
+.nyc_output/
+.pnpm-store/
+.portable-npp/
+portable-npp/
+dist-*/
+out/
+build/
+
+# WebView2 user data (if ever created next to sources)
+EBWebView/
+*.WebView2/
+
+# Windows / VS
+.vs/
+*.suo
+*.user
+*.vcxproj.user
+
+# OS / editors
+Thumbs.db
+Desktop.ini
+.DS_Store
+.idea/
+.vscode/*
+!.vscode/extensions.json

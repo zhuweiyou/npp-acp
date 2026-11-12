@@ -1,0 +1,13 @@
+[package]
+name = "mock-agent"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "mock-agent"
+path = "src/main.rs"
+
+[dependencies]
+agent-client-protocol = { version = "5.2.0", features = ["stdio"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
