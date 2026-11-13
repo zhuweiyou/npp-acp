@@ -64,6 +64,9 @@ jobs:
           BUMP: ${{ inputs.bump }}
         run: |
           $ErrorActionPreference = "Stop"
+          # 关闭“原生命令非零退出码即报错”，最终再显式归零 LASTEXITCODE，
+          # 避免 git describe / git tag 的正常非零返回被 runner 当成步骤失败。
+          $PSNativeCommandUseErrorActionPreference = $false
 
           $prevTag = ""
           try { $prevTag = (git describe --tags --abbrev=0 --match "v*" HEAD 2>$null) } catch { $prevTag = "" }
@@ -90,8 +93,8 @@ jobs:
           $semver = "$major.$minor.$patch"
           $tag = "v$semver"
 
-          git rev-parse -q --verify "refs/tags/$tag" > $null
-          if ($LASTEXITCODE -eq 0) { throw "tag $tag 已存在" }
+          $existing = git tag -l "$tag"
+          if ($existing) { throw "tag $tag 已存在" }
 
           "PREV_TAG=$prevTag" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           "SEMVER=$semver"    | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
@@ -101,6 +104,7 @@ jobs:
 
           $fromLabel = if ($prevTag) { $prevTag } else { "<无 tag>" }
           Write-Host "从 $fromLabel 按 $($env:BUMP) 升级到 $tag"
+          $global:LASTEXITCODE = 0
 
       - name: Generate release notes
         shell: pwsh
