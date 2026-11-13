@@ -2,6 +2,10 @@
 
 Notepad++ 的 **ACP（Agent Client Protocol）聊天插件**：在 Notepad++ 里打开一个右侧停靠面板，直接和 ACP agent 对话，让 agent 读写你正在编辑的代码。
 
+
+<img width="1427" height="1002" alt="ScreenShot_2026-11-13_155958_336" src="https://github.com/user-attachments/assets/da075d24-1d9c-48bc-b8b2-6e9e54d2cf9b" />
+
+
 ## 环境要求
 
 - Windows 10 / 11（x64）
