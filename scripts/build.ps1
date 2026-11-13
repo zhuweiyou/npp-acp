@@ -8,7 +8,7 @@ Write-Host "==> build Rust plugin (release) =="
 cargo build --manifest-path "$root\Cargo.toml" -p npp-acp --lib --release
 
 Write-Host "==> build UI (Vite+) =="
-pnpm -C "$root\crates\npp-acp-ui" exec vp build
+pnpm -C "$root\crates\npp-acp-ui" exec vpr build
 
 Write-Host "==> assemble dist =="
 $dist = "$root\dist\npp-acp"

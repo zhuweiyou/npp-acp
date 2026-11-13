@@ -62,7 +62,7 @@ dist\npp-acp\ui\...           # 前端静态资源
 dist\npp-acp.zip              # 可直接分发的压缩包
 ```
 
-`build.ps1` 内部：`cargo build -p npp-acp --lib --release` → `pnpm -C crates\npp-acp-ui exec vp build`（输出到 `crates/npp-acp-ui/dist`）→ 复制 DLL 与 UI 到 `dist\npp-acp` → `Compress-Archive` 打 zip。
+`build.ps1` 内部：`cargo build -p npp-acp --lib --release` → `pnpm -C crates\npp-acp-ui exec vpr build`（输出到 `crates/npp-acp-ui/dist`）→ 复制 DLL 与 UI 到 `dist\npp-acp` → `Compress-Archive` 打 zip。
 
 ## 开发调试（dev harness）
 
