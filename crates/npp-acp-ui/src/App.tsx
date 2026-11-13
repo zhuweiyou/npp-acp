@@ -25,6 +25,7 @@ interface ChatMessage {
   content: string
   streaming?: boolean
   tool?: ToolInfo & { seq: number }
+  thought?: { text: string; done: boolean }
 }
 
 interface AgentInfo {
@@ -103,7 +104,7 @@ function toolInfo(update: Record<string, unknown>): ToolInfo {
     const p = String(u.locations[0]?.path ?? "")
     name = p.split(/[\\/]/).filter(Boolean).pop() || ""
   }
-  if (!name) name = "Tool"
+  if (!name) name = ""
 
   const status = String(u.status ?? "")
   const stripFence = (t: string) =>
@@ -195,6 +196,17 @@ export default function App() {
 
   const pushSystem = (content: string) => setMessages((prev) => [...prev, { key: nextKey(), role: "system", content }])
 
+  // 思考结束：把当前思考块标记为完成，UI 会自动折叠成一行。
+  const finishThought = () => {
+    const key = thoughtKey.current
+    if (key) {
+      setMessages((prev) =>
+        prev.map((m) => (m.key === key && m.thought ? { ...m, thought: { ...m.thought, done: true } } : m)),
+      )
+      thoughtKey.current = null
+    }
+  }
+
   const appendAssistant = (text: string) => {
     if (!text) return
     setMessages((prev) => {
@@ -235,7 +247,7 @@ export default function App() {
   const handleUpdate = (update: Record<string, unknown>) => {
     const kind = update.sessionUpdate
     if (kind === "agent_message_chunk") {
-      thoughtKey.current = null
+      finishThought()
       const content = update.content as { text?: string } | undefined
       queueText(content?.text ?? "")
     } else if (kind === "agent_thought_chunk") {
@@ -245,15 +257,19 @@ export default function App() {
         setMessages((prev) => {
           const key = thoughtKey.current
           if (key) {
-            return prev.map((m) => (m.key === key ? { ...m, content: m.content + text } : m))
+            return prev.map((m) =>
+              m.key === key && m.thought
+                ? { ...m, thought: { ...m.thought, text: m.thought.text + text } }
+                : m,
+            )
           }
           const k = nextKey()
           thoughtKey.current = k
-          return [...prev, { key: k, role: "system", content: `🧠 ${text}` }]
+          return [...prev, { key: k, role: "system", content: "", thought: { text, done: false } }]
         })
       }
     } else if (kind === "tool_call" || kind === "tool_call_update") {
-      thoughtKey.current = null
+      finishThought()
       const u = update as Record<string, unknown>
       const rawId = u.toolCallId ?? u.tool_call_id
       const id = rawId ? String(rawId) : ""
@@ -262,7 +278,18 @@ export default function App() {
         const key = id ? toolKeys.current.get(id) : undefined
         if (key) {
           return prev.map((m) =>
-            m.key === key ? { ...m, tool: { ...info, seq: m.tool?.seq ?? 0 } } : m,
+            m.key === key
+              ? {
+                  ...m,
+                  tool: {
+                    name: info.name || m.tool?.name || "",
+                    title: info.title || m.tool?.title || "",
+                    status: info.status || m.tool?.status || "",
+                    detail: info.detail || m.tool?.detail || "",
+                    seq: m.tool?.seq ?? 0,
+                  },
+                }
+              : m,
           )
         }
         const k = nextKey()
@@ -285,7 +312,7 @@ export default function App() {
     if (status === "no_workspace") return
     streamingKey.current = null
     pendingText.current = ""
-    thoughtKey.current = null
+    finishThought()
     toolKeys.current.clear()
     toolSeq.current = 0
     setMessages((prev) => [...prev, { key: nextKey(), role: "user", content: value }])
@@ -298,12 +325,18 @@ export default function App() {
 
   const handleNewSession = () => {
     send({ type: "new_session" })
+    if (flushTimer.current !== null) {
+      clearTimeout(flushTimer.current)
+      flushTimer.current = null
+    }
+    pendingText.current = ""
     streamingKey.current = null
     thoughtKey.current = null
     toolKeys.current.clear()
     toolSeq.current = 0
     setBusy(false)
-    pushSystem("已请求新建会话")
+    // 真正清空上一轮对话，避免看起来还在旧会话里继续。
+    setMessages([{ key: nextKey(), role: "system", content: "已开始新会话。" }])
   }
 
   const respondPermission = (optionId: string | null) => {
@@ -388,8 +421,8 @@ export default function App() {
         flushPending()
         setBusy(false)
         setMessages((prev) => prev.map((m) => (m.key === streamingKey.current ? { ...m, streaming: false } : m)))
+        finishThought()
         streamingKey.current = null
-        thoughtKey.current = null
         toolKeys.current.clear()
         toolSeq.current = 0
       } else if (type === "error") {
@@ -478,7 +511,27 @@ export default function App() {
           <div className="msg-list">
             {messages.map((m) => (
               <div key={m.key} className={`msg-row ${m.role}`}>
-                {m.tool ? (
+                {m.thought ? (
+                  <details className="thought-block" open={m.thought.done ? undefined : true}>
+                    <summary className="thought-summary">
+                      <span className="thought-title">🧠 思考</span>
+                      <span className="thought-meta">
+                        {m.thought.done
+                          ? `${m.thought.text.replace(/\s+/g, "").length} 字`
+                          : "思考中…"}
+                      </span>
+                    </summary>
+                    <div
+                      className="thought-content"
+                      ref={(el) => {
+                        // 流式思考时始终滚到底部
+                        if (el && !m.thought?.done) el.scrollTop = el.scrollHeight
+                      }}
+                    >
+                      {m.thought.text}
+                    </div>
+                  </details>
+                ) : m.tool ? (
                   <details className="tool-block">
                     <summary className="tool-summary">
                       <span className="tool-seq">#{m.tool.seq}</span>

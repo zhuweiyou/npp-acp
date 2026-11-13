@@ -282,6 +282,70 @@ body {
   font-variant-numeric: tabular-nums;
 }
 
+/* thinking: streaming 时展开，结束后自动折叠成一行，可点击 toggle */
+.thought-block {
+  width: 100%;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--panel);
+  overflow: hidden;
+  font-family: var(--editor-font);
+  font-size: calc(var(--editor-font-size) - 1px);
+}
+
+.thought-summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  cursor: pointer;
+  list-style: none;
+  user-select: none;
+  color: var(--muted);
+}
+
+.thought-summary::-webkit-details-marker {
+  display: none;
+}
+
+.thought-summary::before {
+  content: "▸";
+  font-size: 10px;
+  color: var(--muted);
+  transition: transform 0.15s ease;
+}
+
+.thought-block[open] > .thought-summary::before {
+  transform: rotate(90deg);
+}
+
+.thought-block[open] > .thought-summary {
+  border-bottom: 1px solid var(--border);
+}
+
+.thought-title {
+  color: var(--text);
+  font-weight: 500;
+}
+
+.thought-meta {
+  margin-left: auto;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.thought-content {
+  padding: 8px 10px;
+  color: var(--muted);
+  font-family: var(--editor-font);
+  font-size: calc(var(--editor-font-size) - 1px);
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 260px;
+  overflow: auto;
+}
+
 /* tool call: collapsible block, each call stacks downward */
 .tool-block {
   width: 100%;
@@ -665,6 +729,8 @@ body {
 .app-root .event-line,
 .app-root .tool-block,
 .app-root .tool-detail,
+.app-root .thought-block,
+.app-root .thought-content,
 .app-root .app-footer .ant-sender textarea {
   font-family: var(--editor-font) !important;
   font-size: var(--editor-font-size) !important;
