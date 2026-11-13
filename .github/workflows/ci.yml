@@ -1,0 +1,62 @@
+name: CI
+
+# 推送到 main、对 main 的 PR，以及手动触发时，执行测试 + 构建。
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test-build:
+    # 插件是 Windows x64 cdylib（wry/tao + WebView2 + windows crate），必须在 Windows 上构建。
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+          cache-dependency-path: crates/npp-acp-ui/pnpm-lock.yaml
+
+      - name: Install UI deps
+        working-directory: crates/npp-acp-ui
+        run: pnpm install --frozen-lockfile
+
+      - name: Test (Rust)
+        run: cargo test --workspace --locked
+
+      - name: Build plugin
+        run: powershell -ExecutionPolicy Bypass -File scripts/build.ps1
+
+      - name: Upload plugin artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: npp-acp
+          path: dist/npp-acp.zip
+          retention-days: 7

@@ -645,6 +645,35 @@ fn handle_ipc(body: &str) {
                 let _ = tx.send(acp_client::Command::Cancel);
             }
         }
+        "set_mode" => {
+            let mode_id = parsed
+                .get("modeId")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            if !mode_id.is_empty() {
+                if let Some(tx) = cmd_tx().lock().unwrap().as_ref() {
+                    let _ = tx.send(acp_client::Command::SetMode { mode_id });
+                }
+            }
+        }
+        "set_config" => {
+            let config_id = parsed
+                .get("configId")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let value = parsed
+                .get("value")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            if !config_id.is_empty() {
+                if let Some(tx) = cmd_tx().lock().unwrap().as_ref() {
+                    let _ = tx.send(acp_client::Command::SetConfig { config_id, value });
+                }
+            }
+        }
         "permission_response" => {
             let id = parsed.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
             let option_id = parsed.get("optionId").and_then(|v| v.as_str()).map(|s| s.to_string());

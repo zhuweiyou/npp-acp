@@ -1,0 +1,157 @@
+name: Release
+
+# 只允许“手动填表”触发：选择升级类型（patch/minor/major），工作流自动推算下一个
+# 语义化版本，构建插件，打 tag 并创建 GitHub Release，把插件产物上传到 Release 供下载。
+# 推送到 main 不会触发发布（发布走 CI 之外的独立流程）。
+on:
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: "版本升级类型"
+        required: true
+        type: choice
+        default: patch
+        options:
+          - patch
+          - minor
+          - major
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # 需要完整 tag 历史来推算下一个版本、判断 tag 是否已存在、生成 Release 正文。
+          fetch-depth: 0
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+          cache-dependency-path: crates/npp-acp-ui/pnpm-lock.yaml
+
+      - name: Install UI deps
+        working-directory: crates/npp-acp-ui
+        run: pnpm install --frozen-lockfile
+
+      - name: Resolve next version
+        id: version
+        shell: pwsh
+        env:
+          BUMP: ${{ inputs.bump }}
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          $prevTag = ""
+          try { $prevTag = (git describe --tags --abbrev=0 --match "v*" HEAD 2>$null) } catch { $prevTag = "" }
+          if (-not $prevTag) { $prevTag = "" }
+
+          if ($prevTag) {
+            $base = $prevTag.TrimStart("v")
+          } else {
+            # 没有可用 tag 时，以 Cargo.toml 里的版本作为基线（patch 即在它基础上 +1）。
+            $cargo = Get-Content Cargo.toml -Raw
+            if ($cargo -match 'version\s*=\s*"(\d+\.\d+\.\d+)"') { $base = $Matches[1] } else { $base = "0.0.0" }
+          }
+          if ($base -notmatch '^\d+\.\d+\.\d+$') { $base = "0.0.0" }
+
+          $parts = $base.Split(".")
+          [int]$major = $parts[0]; [int]$minor = $parts[1]; [int]$patch = $parts[2]
+          switch ($env:BUMP) {
+            "major" { $major++; $minor = 0; $patch = 0 }
+            "minor" { $minor++; $patch = 0 }
+            "patch" { $patch++ }
+            default { throw "未知的 bump 类型：$($env:BUMP)" }
+          }
+
+          $semver = "$major.$minor.$patch"
+          $tag = "v$semver"
+
+          git rev-parse -q --verify "refs/tags/$tag" > $null
+          if ($LASTEXITCODE -eq 0) { throw "tag $tag 已存在" }
+
+          "PREV_TAG=$prevTag" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "SEMVER=$semver"    | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "TAG=$tag"          | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "tag=$tag"          | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "semver=$semver"    | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+          $fromLabel = if ($prevTag) { $prevTag } else { "<无 tag>" }
+          Write-Host "从 $fromLabel 按 $($env:BUMP) 升级到 $tag"
+
+      - name: Generate release notes
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $range = if ($env:PREV_TAG) { "$env:PREV_TAG..HEAD" } else { "HEAD" }
+          $subjects = git log $range --pretty=format:'%s'
+          $lines = @($subjects -split "`n" | Where-Object { $_ -and $_.Trim() -and $_ -notmatch '^chore\(release\)' })
+
+          $sb = New-Object System.Text.StringBuilder
+          [void]$sb.AppendLine("## What's Changed")
+          if ($env:PREV_TAG) { [void]$sb.AppendLine(""); [void]$sb.AppendLine("Compared to $($env:PREV_TAG)") }
+
+          $groups = [ordered]@{
+            feat = "Features"; fix = "Fixes"; perf = "Performance"; refactor = "Refactor";
+            docs = "Docs"; test = "Tests"; build = "Build"; ci = "CI"; style = "Style"; chore = "Chores"
+          }
+          $found = $false
+          foreach ($k in $groups.Keys) {
+            $pattern = "^$k(\([^)]*\))?!?:\s+"
+            $items = @($lines | Where-Object { $_ -match $pattern } | ForEach-Object { $_ -replace $pattern, "" })
+            if ($items.Count -gt 0) {
+              [void]$sb.AppendLine(""); [void]$sb.AppendLine("### $($groups[$k])")
+              foreach ($i in $items) { [void]$sb.AppendLine("- $i") }
+              $found = $true
+            }
+          }
+          $allPat = '^(feat|fix|perf|refactor|docs|test|build|ci|style|chore)(\([^)]*\))?!?:\s+'
+          $others = @($lines | Where-Object { $_ -notmatch $allPat })
+          if ($others.Count -gt 0) {
+            [void]$sb.AppendLine(""); [void]$sb.AppendLine("### Other")
+            foreach ($i in $others) { [void]$sb.AppendLine("- $i") }
+            $found = $true
+          }
+          if (-not $found) { [void]$sb.AppendLine(""); [void]$sb.AppendLine("No commits") }
+
+          $sb.ToString() | Out-File -FilePath release-notes.md -Encoding utf8
+          Write-Host "----- release-notes.md -----"
+          Get-Content release-notes.md
+
+      - name: Build plugin
+        run: powershell -ExecutionPolicy Bypass -File scripts/build.ps1
+
+      - name: Create and push tag
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a $env:TAG -m $env:TAG
+          git push origin $env:TAG
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create $env:TAG "dist/npp-acp.zip#npp-acp-$env:TAG.zip" --title $env:TAG --notes-file release-notes.md
