@@ -468,10 +468,25 @@ async fn command_loop(
                     SessionConfigId::new(config_id),
                     SessionConfigOptionValue::value_id(value),
                 );
-                if let Err(err) = connection.send_request(request).block_task().await {
-                    let _ = ui_tx.send(UiEvent::Error {
-                        message: err.to_string(),
-                    });
+                match connection.send_request(request).block_task().await {
+                    Ok(response) => {
+                        // 把 agent 返回的最新配置项推给 UI，保证下拉实时刷新。
+                        let config =
+                            serde_json::to_value(&response.config_options).unwrap_or(serde_json::Value::Null);
+                        let update = serde_json::json!({
+                            "sessionUpdate": "config_option_update",
+                            "configOptions": config,
+                        });
+                        let _ = ui_tx.send(UiEvent::Update {
+                            session_id: session_id_to_string(&session_id),
+                            update,
+                        });
+                    }
+                    Err(err) => {
+                        let _ = ui_tx.send(UiEvent::Error {
+                            message: err.to_string(),
+                        });
+                    }
                 }
             }
         }

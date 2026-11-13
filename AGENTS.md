@@ -40,11 +40,11 @@ dist/                  构建产物（被 .gitignore 忽略）
 5. Rust → JS：`evaluate_script("window.__nppacp.emit({...})")`，事件类型见 `acp_client::UiEvent`（`status` / `workspace` / `session` / `session_config` / `update` / `permission` / `prompt_done` / `error` / `theme`）。
 6. 跨线程：ACP 在独立线程 + 自带 tokio runtime；UI 事件经 `UI_QUEUE` 队列 + `PostMessageW(WM_APP_UI_EVENT)` 回到 UI 线程再 `evaluate_script`。
 7. 文件桥：`ScintillaBridge` 把「当前编辑缓冲区」映射到 Scintilla（`SCI_GETTEXT` / `SCI_SETTEXT`，能读写未保存内容），其它路径走磁盘。
-8. 工作区：`current_file_path` 取当前 buffer 路径，`acp_client::find_git_root` 向上找 `.git` 作为 `cwd`；无 git 仓库则 `no_workspace` 并禁用输入。
+8. 工作目录：`current_file_path` 取当前 buffer 路径（`NPPM_GETFULLCURRENTPATH`，回退 buffer id），取其所在目录作为 ACP `cwd`；**不再要求 git 仓库**。无文件时回退进程当前目录；文件打开/切换时若 ACP 未启动会重试。
 
 ## 本地构建
 
-前置：Rust（`x86_64-pc-windows-msvc`）、Node 20+、pnpm 11、WebView2 Runtime。
+前置：Rust（`x86_64-pc-windows-msvc`）、Node 24+、pnpm 11、WebView2 Runtime。
 
 ```powershell
 # 1) 安装前端依赖
@@ -79,7 +79,7 @@ cargo run -p npp-acp --bin npp-acp-dev
 接真实 agent（例如 `claude-agent-acp`）：
 
 ```powershell
-# 先全局安装默认 agent（需要 Node.js）
+# 先全局安装默认 agent（需要 Node.js 24+）
 npm i -g @anthropic-ai/claude-code @agentclientprotocol/claude-agent-acp
 
 $env:NPP_ACP_AGENT='["cmd","/c","claude-agent-acp.cmd"]'
@@ -95,7 +95,7 @@ cargo run -p npp-acp --bin npp-acp-dev
 | `NPP_ACP_UI_DIR` | 覆盖 UI 静态资源目录 | 插件 |
 | `NPP_ACP_AUTOOPEN` | `NPPN_READY` 时自动打开面板 | 插件 |
 | `NPP_ACP_AGENT` | agent 命令（JSON 数组或纯字符串），覆盖默认 | dev harness |
-| `NPP_ACP_WORKSPACE` | 指定工作区起始目录（仍会向上找 `.git`） | dev harness |
+| `NPP_ACP_WORKSPACE` | 指定工作目录（不再要求 `.git`） | dev harness |
 | `NPP_ACP_SELFTEST` | 页面加载后自动发一条 prompt，走真实发送路径 | dev harness |
 
 ## 前端工具链（Vite+）

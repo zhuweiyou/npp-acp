@@ -1,17 +1,30 @@
-import { useEffect, useRef, useState } from "react"
-import { Bubble, Sender } from "@ant-design/x"
-import XMarkdown from "@ant-design/x-markdown"
+import { useEffect, useMemo, useRef, useState } from "react"
+import { Sender } from "@ant-design/x"
+import MarkdownIt from "markdown-it"
+import hljs from "highlight.js"
+import githubLightCss from "github-markdown-css/github-markdown-light.css?url"
+import githubDarkCss from "github-markdown-css/github-markdown-dark.css?url"
+import hljsLightCss from "highlight.js/styles/github.css?url"
+import hljsDarkCss from "highlight.js/styles/github-dark.css?url"
 import { Badge, Button, ConfigProvider, Flex, Input, Modal, Select, Typography, theme as antdTheme } from "antd"
 import { onEvent, send, type IpcMessage } from "./ipc"
 
 type ChatRole = "user" | "assistant" | "system"
 type ThemeMode = "light" | "dark"
 
+interface ToolInfo {
+  name: string
+  title: string
+  status: string
+  detail: string
+}
+
 interface ChatMessage {
   key: string
   role: ChatRole
   content: string
   streaming?: boolean
+  tool?: ToolInfo & { seq: number }
 }
 
 interface AgentInfo {
@@ -34,17 +47,93 @@ interface PermissionRequest {
 let seq = 0
 const nextKey = () => `m-${Date.now()}-${seq++}`
 
+const md = new MarkdownIt({
+  html: false,
+  linkify: true,
+  breaks: true,
+  highlight(str: string, lang: string) {
+    if (lang && hljs.getLanguage(lang)) {
+      try {
+        return `<pre class="hljs"><code>${hljs.highlight(str, { language: lang, ignoreIllegals: true }).value}</code></pre>`
+      } catch {
+        // fall through
+      }
+    }
+    return `<pre class="hljs"><code>${md.utils.escapeHtml(str)}</code></pre>`
+  },
+})
+
+function MarkdownView({ content }: { content: string }) {
+  const html = useMemo(() => md.render(content), [content])
+  return <div className="markdown-body" dangerouslySetInnerHTML={{ __html: html }} />
+}
+
+function toolInfo(update: Record<string, unknown>): ToolInfo {
+  const u = update as Record<string, any>
+  const rawInput = u.rawInput ?? u.raw_input
+  const raw = rawInput && typeof rawInput === "object" ? (rawInput as Record<string, any>) : undefined
+  const kindLabels: Record<string, string> = {
+    read: "Read",
+    edit: "Edit",
+    delete: "Delete",
+    move: "Move",
+    search: "Search",
+    execute: "Execute",
+    think: "Think",
+    fetch: "Fetch",
+  }
+  const title = String(u.title ?? "").trim()
+  const kindLabel = kindLabels[String(u.kind ?? "").toLowerCase()] ?? ""
+
+  let name =
+    [u.name, u.toolName, u.tool, raw?.tool, raw?.toolName, raw?.name]
+      .map((v) => String(v ?? "").trim())
+      .find(Boolean) ?? ""
+  if (!name && title && title !== "tool") name = title
+  if (!name && kindLabel) name = kindLabel
+  if (!name && raw) {
+    const cmd = raw.command ?? raw.cmd
+    if (typeof cmd === "string") name = cmd.trim().split(/\s+/)[0]
+    else if (Array.isArray(cmd) && cmd.length) name = String(cmd[0])
+    else if (typeof raw.path === "string") name = raw.path.split(/[\\/]/).filter(Boolean).pop() || "Read"
+    else if (typeof raw.pattern === "string") name = "Search"
+    else if (typeof raw.query === "string") name = "Search"
+  }
+  if (!name && Array.isArray(u.locations) && u.locations.length) {
+    const p = String(u.locations[0]?.path ?? "")
+    name = p.split(/[\\/]/).filter(Boolean).pop() || ""
+  }
+  if (!name) name = "Tool"
+
+  const status = String(u.status ?? "")
+  const stripFence = (t: string) =>
+    t
+      .replace(/^\s*```[a-zA-Z0-9_-]*\s*\n?/, "")
+      .replace(/\n?\s*```\s*$/, "")
+      .trim()
+  const fmt = (v: any) => (typeof v === "string" ? stripFence(v) : JSON.stringify(v, null, 2))
+  const parts: string[] = []
+  if (rawInput !== undefined) parts.push(fmt(rawInput))
+  const content = u.content
+  if (Array.isArray(content)) {
+    const texts = content
+      .map((c: any) => (typeof c?.content?.text === "string" ? c.content.text : typeof c?.text === "string" ? c.text : ""))
+      .filter(Boolean)
+      .map(stripFence)
+    if (texts.length) parts.push(texts.join("\n"))
+  } else if (typeof content === "string") {
+    parts.push(stripFence(content))
+  }
+  const out = u.rawOutput ?? u.raw_output
+  if (out !== undefined) parts.push(fmt(out))
+  return { name, title: title && title !== name ? title : "", status, detail: parts.filter(Boolean).join("\n\n") }
+}
+
 function initialTheme(): ThemeMode {
   if (typeof window !== "undefined" && window.matchMedia) {
     return window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light"
   }
   return "light"
-}
-
-const baseName = (p?: string) => {
-  if (!p) return ""
-  const parts = p.split(/[\\/]/).filter(Boolean)
-  return parts[parts.length - 1] ?? p
 }
 
 interface SelectOptionView {
@@ -97,8 +186,11 @@ export default function App() {
   const streamingKey = useRef<string | null>(null)
   const pendingText = useRef("")
   const flushTimer = useRef<number | null>(null)
-  const toolKey = useRef<string | null>(null)
-  const toolCount = useRef(0)
+  // 思考块：连续 thought chunk 追加到同一条，遇到消息/工具则另起一块。
+  const thoughtKey = useRef<string | null>(null)
+  // 工具调用：按 toolCallId 映射到各自的消息；没有 id 时逐条追加，序号递增。
+  const toolKeys = useRef<Map<string, string>>(new Map())
+  const toolSeq = useRef(0)
   const bodyRef = useRef<HTMLDivElement | null>(null)
 
   const pushSystem = (content: string) => setMessages((prev) => [...prev, { key: nextKey(), role: "system", content }])
@@ -143,20 +235,40 @@ export default function App() {
   const handleUpdate = (update: Record<string, unknown>) => {
     const kind = update.sessionUpdate
     if (kind === "agent_message_chunk") {
+      thoughtKey.current = null
       const content = update.content as { text?: string } | undefined
       queueText(content?.text ?? "")
+    } else if (kind === "agent_thought_chunk") {
+      const content = update.content as { text?: string } | undefined
+      const text = content?.text ?? ""
+      if (text) {
+        setMessages((prev) => {
+          const key = thoughtKey.current
+          if (key) {
+            return prev.map((m) => (m.key === key ? { ...m, content: m.content + text } : m))
+          }
+          const k = nextKey()
+          thoughtKey.current = k
+          return [...prev, { key: k, role: "system", content: `🧠 ${text}` }]
+        })
+      }
     } else if (kind === "tool_call" || kind === "tool_call_update") {
-      toolCount.current += 1
-      const title = String(update.title ?? update.kind ?? "tool")
+      thoughtKey.current = null
+      const u = update as Record<string, unknown>
+      const rawId = u.toolCallId ?? u.tool_call_id
+      const id = rawId ? String(rawId) : ""
+      const info = toolInfo(update)
       setMessages((prev) => {
-        const key = toolKey.current
-        const content = `🔧 工具调用 ${toolCount.current}：${title}`
+        const key = id ? toolKeys.current.get(id) : undefined
         if (key) {
-          return prev.map((m) => (m.key === key ? { ...m, content } : m))
+          return prev.map((m) =>
+            m.key === key ? { ...m, tool: { ...info, seq: m.tool?.seq ?? 0 } } : m,
+          )
         }
         const k = nextKey()
-        toolKey.current = k
-        return [...prev, { key: k, role: "system", content }]
+        const seq = ++toolSeq.current
+        if (id) toolKeys.current.set(id, k)
+        return [...prev, { key: k, role: "system", content: "", tool: { ...info, seq } }]
       })
     } else if (kind === "available_commands_update") {
       setCommands((update.availableCommands as { name: string; description?: string }[]) ?? [])
@@ -173,8 +285,9 @@ export default function App() {
     if (status === "no_workspace") return
     streamingKey.current = null
     pendingText.current = ""
-    toolKey.current = null
-    toolCount.current = 0
+    thoughtKey.current = null
+    toolKeys.current.clear()
+    toolSeq.current = 0
     setMessages((prev) => [...prev, { key: nextKey(), role: "user", content: value }])
     setBusy(true)
     if (!send({ type: "prompt", text: value })) {
@@ -186,6 +299,9 @@ export default function App() {
   const handleNewSession = () => {
     send({ type: "new_session" })
     streamingKey.current = null
+    thoughtKey.current = null
+    toolKeys.current.clear()
+    toolSeq.current = 0
     setBusy(false)
     pushSystem("已请求新建会话")
   }
@@ -198,6 +314,24 @@ export default function App() {
 
   useEffect(() => {
     document.documentElement.dataset.theme = mode
+  }, [mode])
+
+  // GitHub Markdown / 高亮主题跟随深浅色切换（浅色用 light，深色用 dark）。
+  useEffect(() => {
+    const setLink = (id: string, href: string) => {
+      let el = document.getElementById(id) as HTMLLinkElement | null
+      if (!el) {
+        el = document.createElement("link")
+        el.id = id
+        el.rel = "stylesheet"
+        const first = document.head.querySelector('link[rel="stylesheet"], style')
+        if (first && first.parentNode) first.parentNode.insertBefore(el, first)
+        else document.head.appendChild(el)
+      }
+      if (el.getAttribute("href") !== href) el.href = href
+    }
+    setLink("github-markdown-theme", mode === "dark" ? githubDarkCss : githubLightCss)
+    setLink("hljs-theme", mode === "dark" ? hljsDarkCss : hljsLightCss)
   }, [mode])
 
   useEffect(() => {
@@ -255,14 +389,25 @@ export default function App() {
         setBusy(false)
         setMessages((prev) => prev.map((m) => (m.key === streamingKey.current ? { ...m, streaming: false } : m)))
         streamingKey.current = null
-        toolKey.current = null
-        toolCount.current = 0
+        thoughtKey.current = null
+        toolKeys.current.clear()
+        toolSeq.current = 0
       } else if (type === "error") {
         setBusy(false)
         setStatus("error")
         pushSystem(`⚠️ ${event.message}`)
       } else if (type === "theme") {
         setMode(event.mode === "dark" ? "dark" : "light")
+      } else if (type === "editor_font") {
+        const font = String(event.font ?? "").trim()
+        const size = Number(event.size ?? 0)
+        const root = document.documentElement
+        if (font)
+          root.style.setProperty(
+            "--editor-font",
+            `"${font}", "SimSun", "宋体", "Microsoft YaHei", ui-monospace, Consolas, monospace`,
+          )
+        if (size > 0) root.style.setProperty("--editor-font-size", `${size}px`)
       }
     })
     send({ type: "list_agents" })
@@ -280,17 +425,11 @@ export default function App() {
     return () => clearTimeout(timer)
   }, [])
 
-  const items = messages.map((m) => ({
-    key: m.key,
-    role: m.role,
-    content: m.content || (m.streaming ? "…" : ""),
-  }))
-
   const statusBadge =
     status === "connected" ? (
       <Badge status="success" text="已连接" />
     ) : status === "no_workspace" ? (
-      <Badge status="default" text="无 Git 工作区" />
+      <Badge status="default" text="无工作目录" />
     ) : status === "error" ? (
       <Badge status="error" text="出错" />
     ) : (
@@ -305,58 +444,65 @@ export default function App() {
       }}
     >
       <Flex vertical className="app-root">
-        <Flex align="center" justify="space-between" wrap="wrap" gap={6} className="app-header">
-          <Flex align="center" gap={6} className="app-header-left">
+        <div className="app-header">
+          <div className="app-header-row">
             <Select
               size="small"
-              style={{ width: 108 }}
+              className="app-agent-select"
               value={agentId}
               placeholder="选择 agent"
               options={agents.map((a) => ({ label: a.name, value: a.id }))}
               onChange={setAgentId}
             />
-            <Button size="small" onClick={handleNewSession} disabled={status === "no_workspace"}>
+            <Button size="small" className="app-btn" onClick={handleNewSession} disabled={status === "no_workspace"}>
               新会话
             </Button>
-            <Button size="small" onClick={() => send({ type: "get_config" })}>
+            <Button size="small" className="app-btn" onClick={() => send({ type: "get_config" })}>
               设置
             </Button>
-          </Flex>
-          <Flex align="center" gap={6} className="app-header-right">
+            <span className="app-spacer" />
             {statusBadge}
-            <Typography.Text type="secondary" className="app-meta" title={statusDetail}>
-              {workspace ? `📁 ${baseName(workspace)}` : "无 git 仓库"}
-              {sessionId ? ` · ${sessionId.slice(0, 8)}` : ""}
-            </Typography.Text>
-          </Flex>
-        </Flex>
+          </div>
+          <div className="app-workspace" title={workspace || statusDetail}>
+            <span className="app-workspace-label">工作目录</span>
+            <span className="app-workspace-path">{workspace || "无工作目录"}</span>
+            {sessionId ? <span className="app-session">{sessionId.slice(0, 8)}</span> : null}
+          </div>
+        </div>
 
         {status === "no_workspace" && (
-          <div className="app-notice">当前打开的文件不在任何 git 仓库中。请打开 git 仓库里的文件后再使用 agent。</div>
+          <div className="app-notice">无法确定 ACP 工作目录（当前没有打开文件）。打开一个文件后会自动重试。</div>
         )}
 
         <div className="app-body" ref={bodyRef}>
-          <Bubble.List
-            items={items}
-            role={{
-              user: {
-                placement: "end",
-                variant: "borderless",
-                contentRender: (content) => <div className="msg msg-user">{String(content)}</div>,
-              },
-              assistant: {
-                placement: "start",
-                variant: "borderless",
-                contentRender: (content) => (
-                  <div className="msg msg-assistant">
-                    <XMarkdown content={String(content)} />
+          <div className="msg-list">
+            {messages.map((m) => (
+              <div key={m.key} className={`msg-row ${m.role}`}>
+                {m.tool ? (
+                  <details className="tool-block">
+                    <summary className="tool-summary">
+                      <span className="tool-seq">#{m.tool.seq}</span>
+                      <span className="tool-name" title={m.tool.title || m.tool.name}>
+                        {m.tool.name || m.tool.title || "tool"}
+                      </span>
+                      {m.tool.status ? (
+                        <span className={`tool-status ${m.tool.status}`}>{m.tool.status}</span>
+                      ) : null}
+                    </summary>
+                    {m.tool.detail ? <pre className="tool-detail">{m.tool.detail}</pre> : null}
+                  </details>
+                ) : m.role === "user" ? (
+                  <div className="msg msg-user">{m.content}</div>
+                ) : m.role === "assistant" ? (
+                  <div className="assistant-plain markdown-body">
+                    <MarkdownView content={m.content || (m.streaming ? "…" : "")} />
                   </div>
-                ),
-              },
-              system: { placement: "start", variant: "borderless" },
-            }}
-            styles={{ root: { width: "100%", maxWidth: "100%" } }}
-          />
+                ) : (
+                  <div className="event-line">{m.content}</div>
+                )}
+              </div>
+            ))}
+          </div>
         </div>
 
         <div className="app-footer">
@@ -377,9 +523,10 @@ export default function App() {
             value={input}
             onChange={setInput}
             loading={busy}
+            autoSize={{ minRows: 2, maxRows: 8 }}
             onCancel={() => send({ type: "cancel" })}
             disabled={status === "no_workspace"}
-            placeholder={status === "no_workspace" ? "需要 git 工作区才能使用 agent" : "输入内容并发送…"}
+            placeholder={status === "no_workspace" ? "无工作目录，打开文件后可用" : "输入内容并发送…"}
             onSubmit={(value) => {
               handleSend(value)
               setInput("")
@@ -387,7 +534,10 @@ export default function App() {
           />
           {(modes.length > 0 ||
             configOptions.some(
-              (o) => o && o.type === "select" && String(o.category ?? "").toLowerCase() !== "mode",
+              (o) =>
+                o &&
+                o.type === "select" &&
+                !["mode", "model_config"].includes(String(o.category ?? "").toLowerCase()),
             )) && (
             <div className="config-bar">
               {modes.length > 0 && (
@@ -411,8 +561,14 @@ export default function App() {
                   const category = String(o.category ?? "").toLowerCase()
                   const id = String(o.id ?? "").toLowerCase()
                   const name = String(o.name ?? "").toLowerCase()
-                  // The mode selector is rendered separately from SessionModeState.
-                  return category !== "mode" && id !== "mode" && name !== "mode" && name !== "模式"
+                  // 模式单独渲染；模型参数（model_config）不展示。
+                  return (
+                    category !== "mode" &&
+                    category !== "model_config" &&
+                    id !== "mode" &&
+                    name !== "mode" &&
+                    name !== "模式"
+                  )
                 })
                 .map((o) => {
                   const id = String(o.id)
@@ -433,7 +589,15 @@ export default function App() {
                         optionFilterProp="label"
                         value={String(o.currentValue ?? "") || undefined}
                         options={flattenOptions(o.options)}
-                        onChange={(value) => send({ type: "set_config", configId: id, value })}
+                        onChange={(value) => {
+                          // 先本地乐观更新，避免受控 Select 在服务端回包前弹回旧值。
+                          setConfigOptions((prev) =>
+                            prev.map((item) =>
+                              String(item.id) === id ? { ...item, currentValue: value } : item,
+                            ),
+                          )
+                          send({ type: "set_config", configId: id, value })
+                        }}
                       />
                     </div>
                   )

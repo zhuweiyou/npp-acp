@@ -251,15 +251,18 @@ fn main() -> anyhow::Result<()> {
     };
     eprintln!("[npp-acp] agent command: {:?}", agent_args);
 
-    // Workspace rule: the agent's root is the git repo that contains the file
-    // being edited. Without a git repo, the agent is disabled.
+    // 工作目录：优先 NPP_ACP_WORKSPACE，其次进程当前目录；不再要求 git 仓库。
     let start_hint = std::env::var("NPP_ACP_WORKSPACE")
         .ok()
         .map(PathBuf::from)
         .or_else(|| std::env::current_dir().ok());
-    let workspace_root = start_hint
-        .as_deref()
-        .and_then(acp_client::find_git_root);
+    let workspace_root = start_hint.map(|p| {
+        if p.is_dir() {
+            p
+        } else {
+            p.parent().map(|d| d.to_path_buf()).unwrap_or(p)
+        }
+    });
     eprintln!("[npp-acp] workspace root: {:?}", workspace_root);
     let bridge = Arc::new(acp_client::FsBridge);
 

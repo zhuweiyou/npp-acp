@@ -27,7 +27,7 @@ Notepad++ 的 **ACP（Agent Client Protocol）聊天插件**：在 Notepad++ 里
 
 ## 使用
 
-1. 先在 Notepad++ 打开一个 **位于 git 仓库内** 的文件（插件会用该仓库根作为 agent 的工作目录）。
+1. 先在 Notepad++ 打开一个文件（该文件所在目录会作为 agent 的工作目录，不要求 git 仓库）。
 2. 菜单 **插件 → Agent ACP**，打开右侧面板。
 3. 面板顶部选择 agent，输入内容回车发送，回复会流式显示。
 4. 顶部按钮：
@@ -41,7 +41,7 @@ Notepad++ 的 **ACP（Agent Client Protocol）聊天插件**：在 Notepad++ 里
 
 ## 配置 agent
 
-默认使用 `claude-agent-acp`。首次使用前需要全局安装（需要 Node.js 环境）：
+默认使用 `claude-agent-acp`。首次使用前需要全局安装（需要 Node.js 24+）：
 
 ```bash
 npm i -g @anthropic-ai/claude-code @agentclientprotocol/claude-agent-acp
@@ -83,10 +83,11 @@ npm i -g @anthropic-ai/claude-code @agentclientprotocol/claude-agent-acp
 - 保存后 **重启 Notepad++** 生效。
 - 也可用环境变量 `NPP_ACP_CONFIG` 指向其它配置文件。
 
-## 工作区规则
+## 工作目录
 
-- agent 的工作目录（`cwd`）= 当前文件所在 git 仓库的根目录。
-- 当前文件不在任何 git 仓库内时，面板提示「无 Git 工作区」并禁用输入。
+- ACP 的工作目录（`cwd`）= 当前打开文件所在的目录，**不再要求 git 仓库**。
+- 没有打开文件时提示「无工作目录」，打开文件后会自动重试。
+- 面板顶部会显示当前 ACP 的工作目录（完整路径）。
 - 文件能读 / 写到哪里，由 agent 自身的权限模式（如 readonly / plan / accept-edits / bypass）决定，插件只负责透传。
 
 ## 日志与排查

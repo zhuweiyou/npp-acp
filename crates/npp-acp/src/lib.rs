@@ -18,8 +18,8 @@ use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, GetClientRect, PostMessageW, RegisterClassW, SendMessageW,
-    SetWindowPos, ShowWindow, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOZORDER, SW_SHOW, WINDOW_EX_STYLE,
-    WNDCLASSW, WS_CHILD, WS_VISIBLE,
+    SetWindowPos, ShowWindow, MINMAXINFO, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOZORDER, SW_SHOW,
+    WINDOW_EX_STYLE, WM_GETMINMAXINFO, WNDCLASSW, WS_CHILD, WS_VISIBLE,
 };
 
 // ---------------------------------------------------------------------------
@@ -110,10 +110,18 @@ const NPPM_DMMREGASDCKDLG: u32 = NPPMSG + 33;
 const NPPM_GETFULLPATHFROMBUFFERID: u32 = NPPMSG + 58;
 const NPPM_GETCURRENTBUFFERID: u32 = NPPMSG + 60;
 const NPPM_ISDARKMODEENABLED: u32 = NPPMSG + 107;
+const NPPM_GETNPPSETTINGSDIRPATH: u32 = NPPMSG + 119;
+
+/// `NPPM_GETFULLCURRENTPATH` 属于 RUNCOMMAND_USER 一族（不是 NPPMSG）。
+const RUNCOMMAND_USER: u32 = WM_USER + 3000;
+const NPPM_GETFULLCURRENTPATH: u32 = RUNCOMMAND_USER + 1;
 
 const NPPN_READY: u32 = 1001;
-const NPPN_DARKMODECHANGED: u32 = 1027;
+const NPPN_FILEOPENED: u32 = 1004;
 const NPPN_SHUTDOWN: u32 = 1009;
+const NPPN_BUFFERACTIVATED: u32 = 1010;
+const NPPN_WORDSTYLESUPDATED: u32 = 1012;
+const NPPN_DARKMODECHANGED: u32 = 1027;
 
 const WM_SIZE: u32 = 0x0005;
 const WM_DESTROY: u32 = 0x0002;
@@ -201,6 +209,10 @@ fn log(msg: &str) {
 const SCI_GETLENGTH: u32 = 2006;
 const SCI_GETTEXT: u32 = 2182;
 const SCI_SETTEXT: u32 = 2181;
+const SCI_GETZOOM: u32 = 2374;
+const SCI_STYLEGETSIZE: u32 = 2485;
+const SCI_STYLEGETFONT: u32 = 2486;
+const STYLE_DEFAULT: usize = 32;
 
 fn scintilla_get_text(sci: isize) -> Option<String> {
     if sci == 0 {
@@ -237,6 +249,107 @@ fn scintilla_set_text(sci: isize, text: &str) {
             Some(LPARAM(bytes.as_ptr() as isize)),
         );
     }
+}
+
+/// Read the editor's default font name and displayed size (including zoom).
+/// Returns `(font_name, size_px)`.
+fn scintilla_font(sci: isize) -> Option<(String, i32)> {
+    if sci == 0 {
+        return None;
+    }
+    let hwnd = HWND(sci as *mut core::ffi::c_void);
+    let mut buf = [0u8; 256];
+    let n = unsafe {
+        SendMessageW(
+            hwnd,
+            SCI_STYLEGETFONT,
+            Some(WPARAM(STYLE_DEFAULT)),
+            Some(LPARAM(buf.as_mut_ptr() as isize)),
+        )
+    }
+    .0;
+    let name = if n > 0 {
+        String::from_utf8_lossy(&buf[..(n as usize).min(buf.len() - 1)]).to_string()
+    } else {
+        String::new()
+    };
+    let size = unsafe {
+        SendMessageW(
+            hwnd,
+            SCI_STYLEGETSIZE,
+            Some(WPARAM(STYLE_DEFAULT)),
+            Some(LPARAM(0)),
+        )
+    }
+    .0 as i32;
+    let zoom = unsafe { SendMessageW(hwnd, SCI_GETZOOM, Some(WPARAM(0)), Some(LPARAM(0))) }.0 as i32;
+    if size <= 0 {
+        return None;
+    }
+    Some((name, (size + zoom).max(6)))
+}
+
+fn send_editor_font() {
+    let (sci_name, sci_size) = scintilla_font(SCINTILLA_MAIN.load(Ordering::Relaxed)).unwrap_or_default();
+    let (cfg_name, cfg_size) = font_from_stylers().unwrap_or_default();
+    let font = if !sci_name.trim().is_empty() { sci_name } else { cfg_name };
+    let size = if sci_size > 0 { sci_size } else { cfg_size };
+    // Scintilla/Notepad++ 的字号是磅值（pt），转成 CSS 像素更接近编辑器观感。
+    let size_px = ((size as f32) * 96.0 / 72.0).round() as i32;
+    log(&format!("editor font: name={font:?} size_pt={size} size_px={size_px}"));
+    if !font.trim().is_empty() || size_px > 0 {
+        let json = serde_json::json!({
+            "type": "editor_font",
+            "font": font,
+            "size": size_px,
+        });
+        reply_json(&json.to_string());
+    }
+}
+
+fn npp_settings_dir() -> Option<PathBuf> {
+    let npp = npp_hwnd();
+    if npp.0.is_null() {
+        return None;
+    }
+    let mut buf = [0u16; 1024];
+    let n = unsafe {
+        SendMessageW(
+            npp,
+            NPPM_GETNPPSETTINGSDIRPATH,
+            Some(WPARAM(buf.len())),
+            Some(LPARAM(buf.as_mut_ptr() as isize)),
+        )
+    }
+    .0;
+    if n <= 0 {
+        return None;
+    }
+    let len = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
+    if len == 0 {
+        return None;
+    }
+    Some(PathBuf::from(String::from_utf16_lossy(&buf[..len])))
+}
+
+fn extract_attr(tag: &str, name: &str) -> Option<String> {
+    let pat = format!("{name}=\"");
+    let start = tag.find(&pat)? + pat.len();
+    let end = tag[start..].find('"')?;
+    Some(tag[start..start + end].to_string())
+}
+
+/// 从 Notepad++ 的 stylers.xml 里读取 "Default Style" 的字体与字号。
+fn font_from_stylers() -> Option<(String, i32)> {
+    let dir = npp_settings_dir()?;
+    let text = std::fs::read_to_string(dir.join("stylers.xml")).ok()?;
+    let idx = text.find("name=\"Default Style\"")?;
+    let rest = &text[idx..];
+    let end = rest.find("/>").unwrap_or_else(|| rest.len().min(2000));
+    let tag = &rest[..end];
+    let font = extract_attr(tag, "fontName")?;
+    let size = extract_attr(tag, "fontSize").and_then(|s| s.parse::<i32>().ok())?;
+    Some((font, size))
 }
 
 /// Document bridge that maps the active editor buffer to Scintilla and other
@@ -483,28 +596,58 @@ fn agent_label() -> String {
 }
 fn current_file_path() -> Option<PathBuf> {
     let npp = npp_hwnd();
-    let id = unsafe { SendMessageW(npp, NPPM_GETCURRENTBUFFERID, Some(WPARAM(0)), Some(LPARAM(0))) }.0 as usize;
+    if npp.0.is_null() {
+        return None;
+    }
+
+    // 首选 NPPM_GETFULLCURRENTPATH：直接取出当前文档完整路径。
+    let mut buf = [0u16; 2048];
+    let ok = unsafe {
+        SendMessageW(
+            npp,
+            NPPM_GETFULLCURRENTPATH,
+            Some(WPARAM(buf.len())),
+            Some(LPARAM(buf.as_mut_ptr() as isize)),
+        )
+    }
+    .0;
+    if ok != 0 {
+        let len = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
+        if len > 0 {
+            let s = String::from_utf16_lossy(&buf[..len]);
+            let p = PathBuf::from(&s);
+            // 未命名/新文件会返回 “新文件1” 这类相对名，不能作为工作目录。
+            if p.is_absolute() && p.exists() {
+                return Some(p);
+            }
+        }
+    }
+
+    // 回退：NPPM_GETCURRENTBUFFERID + NPPM_GETFULLPATHFROMBUFFERID。
+    let id = unsafe { SendMessageW(npp, NPPM_GETCURRENTBUFFERID, Some(WPARAM(0)), Some(LPARAM(0))) }.0
+        as usize;
     if id == 0 {
         return None;
     }
-    let mut buf = [0u16; 2048];
+    let mut buf2 = [0u16; 2048];
     let n = unsafe {
         SendMessageW(
             npp,
             NPPM_GETFULLPATHFROMBUFFERID,
             Some(WPARAM(id)),
-            Some(LPARAM(buf.as_mut_ptr() as isize)),
+            Some(LPARAM(buf2.as_mut_ptr() as isize)),
         )
     }
     .0;
     if n <= 0 {
         return None;
     }
-    let s = String::from_utf16_lossy(&buf[..n as usize]);
-    if s.is_empty() {
-        None
+    let s = String::from_utf16_lossy(&buf2[..(n as usize).min(buf2.len())]);
+    let p = PathBuf::from(&s);
+    if p.is_absolute() && p.exists() {
+        Some(p)
     } else {
-        Some(PathBuf::from(s))
+        None
     }
 }
 
@@ -525,16 +668,28 @@ fn start_acp() {
     if ACP_STARTED.load(Ordering::SeqCst) != 0 {
         return;
     }
-    let workspace = current_file_path().and_then(|p| acp_client::find_git_root(&p));
+    // 面板还没创建时不做任何工作区判断（例如启动早期收到 buffer 通知）。
+    if PANEL_HWND.load(Ordering::Relaxed) == 0 {
+        return;
+    }
+    let file = current_file_path();
+    // 不再要求 git 仓库：ACP 的工作目录 = 当前文件所在目录。
+    // 没有打开真实文件时不启动（打开文件后会在 buffer 通知里重试）。
+    let workspace = file
+        .as_deref()
+        .and_then(|p| p.parent().map(|d| d.to_path_buf()))
+        .filter(|d| !d.as_os_str().is_empty());
+    log(&format!("current file: {file:?}"));
+    log(&format!("acp working dir: {workspace:?}"));
     if workspace.is_none() {
         {
             let mut state = ui_state().lock().unwrap();
             state.workspace = Some(String::new());
             state.status = "no_workspace".into();
-            state.detail = "当前文件不在 git 仓库中".into();
+            state.detail = "无法确定工作目录".into();
         }
         reply_json("{\"type\":\"workspace\",\"root\":\"\"}");
-        reply_json("{\"type\":\"status\",\"state\":\"no_workspace\",\"detail\":\"当前文件不在 git 仓库中\"}");
+        reply_json("{\"type\":\"status\",\"state\":\"no_workspace\",\"detail\":\"无法确定工作目录\"}");
         return;
     }
     if ACP_STARTED.swap(1, Ordering::SeqCst) != 0 {
@@ -603,6 +758,7 @@ fn handle_ipc(body: &str) {
                 reply_json(&json);
             }
             replay_state();
+            send_editor_font();
         }
         "get_config" => {
             let cfg = load_config();
@@ -731,22 +887,36 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             resize_webview(hwnd);
             DefWindowProcW(hwnd, msg, wparam, lparam)
         }
+        WM_GETMINMAXINFO => {
+            // 桌面端最小宽度由插件保证（414），Web UI 本身不设宽度、按容器自适应。
+            let info = lparam.0 as *mut MINMAXINFO;
+            if !info.is_null() {
+                unsafe {
+                    (*info).ptMinTrackSize.x = PANEL_WIDTH;
+                }
+            }
+            DefWindowProcW(hwnd, msg, wparam, lparam)
+        }
         WM_APP_SET_WIDTH => {
+            // 停靠管理器异步布局后，仅保证最小宽度，不强制固定宽度。
             let mut r = RECT::default();
             unsafe {
                 let _ = GetClientRect(hwnd, &mut r);
             }
+            let w = (r.right - r.left).max(1);
             let h = (r.bottom - r.top).max(100);
-            unsafe {
-                let _ = SetWindowPos(
-                    hwnd,
-                    None,
-                    0,
-                    0,
-                    PANEL_WIDTH,
-                    h,
-                    SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE,
-                );
+            if w < PANEL_WIDTH {
+                unsafe {
+                    let _ = SetWindowPos(
+                        hwnd,
+                        None,
+                        0,
+                        0,
+                        PANEL_WIDTH,
+                        h,
+                        SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE,
+                    );
+                }
             }
             let mut r2 = RECT::default();
             unsafe {
@@ -913,8 +1083,8 @@ fn create_panel() {
         let _ = ShowWindow(hwnd, SW_SHOW);
     }
 
-    // Docking manager lays out the panel asynchronously; force the preferred
-    // width shortly after creation (plugin-side width, not the web viewport).
+    // Docking manager lays out the panel asynchronously; after it settles, only
+    // ensure the panel is at least PANEL_WIDTH wide (never force an exact width).
     let hwnd_addr = hwnd.0 as isize;
     std::thread::spawn(move || {
         std::thread::sleep(std::time::Duration::from_millis(600));
@@ -933,8 +1103,11 @@ fn create_panel() {
     unsafe {
         let _ = GetClientRect(hwnd, &mut client_rect);
     }
-    let width = (client_rect.right - client_rect.left).max(600) as u32;
-    let height = (client_rect.bottom - client_rect.top).max(400) as u32;
+    // WebView 尺寸完全跟随面板客户区，UI 内部自适应（不硬编码宽度）。
+    let cw = client_rect.right - client_rect.left;
+    let ch = client_rect.bottom - client_rect.top;
+    let width = if cw > 0 { cw as u32 } else { PANEL_WIDTH as u32 };
+    let height = if ch > 0 { ch as u32 } else { 600 };
     let bounds = wry::Rect {
         position: wry::dpi::Position::Physical(wry::dpi::PhysicalPosition::new(0, 0)),
         size: wry::dpi::Size::Physical(wry::dpi::PhysicalSize::new(width, height)),
@@ -968,6 +1141,7 @@ fn create_panel() {
             WEBVIEW.with(|cell| *cell.borrow_mut() = Some(webview));
             log("webview created ok");
             send_theme();
+            send_editor_font();
             ACP_STARTED.store(0, Ordering::SeqCst);
             start_acp();
         }
@@ -1066,6 +1240,17 @@ pub extern "system" fn beNotified(notification: *mut SCNotification) {
             .0;
             THEME_DARK.store(dark, Ordering::Relaxed);
             send_theme();
+        }
+        // 主题/字体样式变化时，把编辑器字体重新推给 UI。
+        NPPN_WORDSTYLESUPDATED => {
+            send_editor_font();
+        }
+        // 打开 / 切换文件后，如果 ACP 还未启动（例如面板打开时没有文件），
+        // 重新按当前文件目录启动 ACP。
+        NPPN_FILEOPENED | NPPN_BUFFERACTIVATED => {
+            if ACP_STARTED.load(Ordering::SeqCst) == 0 {
+                start_acp();
+            }
         }
         NPPN_SHUTDOWN => {}
         _ => {}
